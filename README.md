@@ -1,60 +1,23 @@
 # Apocalypse Inside Web
 
-React archive for Deus Ex: Apocalypse Inside, including the backstory, Sarif Industries, and Codename Nebula pages.
+A React archive for Deus Ex: Apocalypse Inside, featuring the original site's artwork and content alongside pages for the backstory, Sarif Industries, and Codename Nebula.
 
-## Local development
+## Run locally
 
 ```powershell
 docker compose up --build
 ```
 
-The site is available at `http://localhost:8080`. To choose another local port, set `APOCALYPSE_PORT` before starting Compose. The production image is a static build served by the unprivileged Nginx image.
+Open `http://localhost:8080`. To use a different local port, set `APOCALYPSE_PORT` before starting Compose.
 
-The Git repository contains only the React site, its referenced artwork, infrastructure, and deployment configuration. The legacy WordPress installation and `wp-config.php` remain local and are excluded from Git and Docker build contexts.
+## Project structure
 
-## AWS architecture
+- `react-site/` — React application, styles, and media.
+- `infrastructure/` — deployment configuration (operational details are intentionally not documented in this public README).
+- `.github/workflows/` — automated build, security checks, and delivery.
 
-CloudFormation provisions one isolated stack per environment in `us-east-1`:
+The legacy WordPress installation and its configuration are not included in this repository or the Docker build context.
 
-| Environment | Hostname | Stack |
-| --- | --- | --- |
-| Staging | `staging.apocalypseinsi.de` | `apocalypse-inside-staging` |
-| Production | `apocalypseinsi.de` | `apocalypse-inside-production` |
+## Security
 
-Each stack uses a private, encrypted, versioned S3 bucket, CloudFront Origin Access Control, an ACM DNS-validated certificate, security response headers, and a private IAM-invoked health Lambda. Staging's Route 53 alias is stack-managed. Production's apex records remain outside CloudFormation because an existing unmanaged A record must not be silently replaced or imported; the gated production workflow validates that record and performs the approved A/AAAA alias cutover after publishing. The S3 bucket and health logs are retained when a stack is removed. The Lambda has no Function URL or API endpoint.
-
-CloudFront viewer certificates must be created in `us-east-1`. The Route 53 hosted-zone ID is supplied by the deployment environment (`Z1GO58CUQU667P`).
-
-## GitHub Actions delivery
-
-`.github/workflows/site.yml` builds and audits pull requests and `main`, scans source and infrastructure, and creates one verified static artifact. Merges to `main` deploy staging first. Production then waits for approval in the GitHub `production` environment and deploys that same artifact. The environment must restrict deployments to `main` and require the repository owner as reviewer.
-
-GitHub Actions uses short-lived AWS credentials through OIDC. The IAM bootstrap template gives staging and production separate deployment roles and CloudFormation service roles. The trust policy is restricted to this repository's immutable GitHub owner/repository IDs and matching deployment environment claims.
-
-Set the following variables on both GitHub environments:
-
-| Variable | Staging value | Production value |
-| --- | --- | --- |
-| `AWS_ROLE_ARN` | `StagingDeployRoleArn` output | `ProductionDeployRoleArn` output |
-| `AWS_CFN_EXECUTION_ROLE_ARN` | `StagingCloudFormationRoleArn` output | `ProductionCloudFormationRoleArn` output |
-| `AWS_REGION` | `us-east-1` | `us-east-1` |
-| `AWS_HOSTED_ZONE_ID` | `Z1GO58CUQU667P` | `Z1GO58CUQU667P` |
-
-Also set repository variable `AWS_DEPLOY_ENABLED=true` only after both site stacks exist and each distribution, origin access control, and response headers policy ID has been added to the OIDC bootstrap stack. Before that, CI still runs while deployment jobs are skipped.
-
-## Initial deployment
-
-1. Create GitHub `staging` and `production` environments. Restrict both to branch `main`; require the repository owner to approve `production` deployments.
-2. Check whether `token.actions.githubusercontent.com` is already an IAM OIDC provider. Deploy `infrastructure/github-oidc.yaml` as stack `apocalypse-inside-github-oidc`, passing `CreateOidcProvider=false` only if the provider already exists. Use `CAPABILITY_NAMED_IAM`.
-3. Deploy `infrastructure/template.yaml` as the staging stack with `EnvironmentName=staging`, `SiteDomainName=staging.apocalypseinsi.de`, `HostedZoneId=Z1GO58CUQU667P`, and `CreateDnsRecords=true`.
-4. Deploy the production stack with `EnvironmentName=production`, `SiteDomainName=apocalypseinsi.de`, the same hosted-zone ID, and `CreateDnsRecords=false`. This provisions and validates the distribution without replacing the current apex record.
-5. Build with `npm ci` and `npm run build` in `react-site`. Upload `react-site/dist` to each bucket, set `/index.html` to `no-cache`, invalidate each CloudFront distribution, and smoke-test all four routes. Test production through its CloudFront hostname with `apocalypseinsi.de` as the HTTPS host name while the existing apex DNS record remains in place.
-6. Update the OIDC bootstrap stack's `StagingDistributionId`, `StagingOriginAccessControlId`, `StagingResponseHeadersPolicyId`, `ProductionDistributionId`, `ProductionOriginAccessControlId`, and `ProductionResponseHeadersPolicyId` parameters from the site stacks' outputs. This scopes each environment's CloudFront updates and cache invalidations to its own resources.
-7. Add the four variables above to both GitHub environments, verify production approval rules, then set repository variable `AWS_DEPLOY_ENABLED=true` and push the deployment configuration to `main`.
-8. Confirm the staging job and public HTTPS checks succeed. Approve the production job in GitHub. It updates production infrastructure with `CreateDnsRecords=false`, publishes and invalidates the site, verifies that the existing apex A record is still the reviewed `54.69.123.200`, then sets the production Route 53 A/AAAA aliases to CloudFront. If verification fails, restore the previous A target and TTL printed by the cutover step, and remove the AAAA alias if it did not exist before cutover.
-
-`aws cloudformation deploy` should be run with the environment's CloudFormation role ARN and `CAPABILITY_NAMED_IAM`. Keep `CreateDnsRecords=false` for the production stack; the separately gated production workflow performs the apex alias cutover because the existing record is not CloudFormation-managed.
-
-## Security checks
-
-CI runs `npm audit`, CodeQL, Gitleaks, `cfn-lint`, and pinned CloudFormation Guard rules before uploading an artifact. GitHub Actions are pinned to commit SHAs. No login, registration, or data-submission endpoint is part of this static site.
+This static site does not provide login, registration, or data-submission features. Dependency and source checks run as part of the automated build.
