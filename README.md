@@ -21,7 +21,7 @@ CloudFormation provisions one isolated stack per environment in `us-east-1`:
 | Staging | `staging.apocalypseinsi.de` | `apocalypse-inside-staging` |
 | Production | `apocalypseinsi.de` | `apocalypse-inside-production` |
 
-Each stack uses a private, encrypted, versioned S3 bucket, CloudFront Origin Access Control, a Route 53 alias, an ACM DNS-validated certificate, security response headers, and a private IAM-invoked health Lambda. The S3 bucket and health logs are retained when a stack is removed. The Lambda has no Function URL or API endpoint.
+Each stack uses a private, encrypted, versioned S3 bucket, CloudFront Origin Access Control, an ACM DNS-validated certificate, security response headers, and a private IAM-invoked health Lambda. Staging's Route 53 alias is stack-managed. Production's apex records remain outside CloudFormation because an existing unmanaged A record must not be silently replaced or imported; the gated production workflow validates that record and performs the approved A/AAAA alias cutover after publishing. The S3 bucket and health logs are retained when a stack is removed. The Lambda has no Function URL or API endpoint.
 
 CloudFront viewer certificates must be created in `us-east-1`. The Route 53 hosted-zone ID is supplied by the deployment environment (`Z1GO58CUQU667P`).
 
@@ -51,9 +51,9 @@ Also set repository variable `AWS_DEPLOY_ENABLED=true` only after both site stac
 5. Build with `npm ci` and `npm run build` in `react-site`. Upload `react-site/dist` to each bucket, set `/index.html` to `no-cache`, invalidate each CloudFront distribution, and smoke-test all four routes. Test production through its CloudFront hostname with `apocalypseinsi.de` as the HTTPS host name while the existing apex DNS record remains in place.
 6. Update the OIDC bootstrap stack's `StagingDistributionId`, `StagingOriginAccessControlId`, `StagingResponseHeadersPolicyId`, `ProductionDistributionId`, `ProductionOriginAccessControlId`, and `ProductionResponseHeadersPolicyId` parameters from the site stacks' outputs. This scopes each environment's CloudFront updates and cache invalidations to its own resources.
 7. Add the four variables above to both GitHub environments, verify production approval rules, then set repository variable `AWS_DEPLOY_ENABLED=true` and push the deployment configuration to `main`.
-8. Confirm the staging job and public HTTPS checks succeed. Approve the production job in GitHub to set the production Route 53 A/AAAA aliases to CloudFront. If production verification fails, restore the previous apex A-record target from the Route 53 change history or saved record set.
+8. Confirm the staging job and public HTTPS checks succeed. Approve the production job in GitHub. It updates production infrastructure with `CreateDnsRecords=false`, publishes and invalidates the site, verifies that the existing apex A record is still the reviewed `54.69.123.200`, then sets the production Route 53 A/AAAA aliases to CloudFront. If verification fails, restore the previous A target and TTL printed by the cutover step, and remove the AAAA alias if it did not exist before cutover.
 
-`aws cloudformation deploy` should be run with the environment's CloudFormation role ARN and `CAPABILITY_NAMED_IAM`. The first production stack creation must keep `CreateDnsRecords=false`; the approved production workflow turns it on after staging is healthy.
+`aws cloudformation deploy` should be run with the environment's CloudFormation role ARN and `CAPABILITY_NAMED_IAM`. Keep `CreateDnsRecords=false` for the production stack; the separately gated production workflow performs the apex alias cutover because the existing record is not CloudFormation-managed.
 
 ## Security checks
 
