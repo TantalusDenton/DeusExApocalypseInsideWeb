@@ -67,10 +67,12 @@ jobs:
             --output "$archive"
           echo '8c66efb19c63e6c2bf26b9a41bbcf2f85baa8a937b01d350940194faaf64cf1d  '"$archive" | sha256sum --check --status
           tar -xzf "$archive" -C "$RUNNER_TEMP"
+          chmod +x "$RUNNER_TEMP/cfn-guard"
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
 
       - name: Check infrastructure security rules
-        run: cfn-guard validate --rules .github/security/cloudformation.guard --data infrastructure/template.yaml --data infrastructure/github-oidc.yaml
+        shell: bash
+        run: "$RUNNER_TEMP/cfn-guard validate --rules .github/security/cloudformation.guard --data infrastructure/template.yaml --data infrastructure/github-oidc.yaml"
 
       - name: Scan for leaked secrets
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
