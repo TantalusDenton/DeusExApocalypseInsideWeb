@@ -53,7 +53,7 @@ jobs:
 
       - name: Lint CloudFormation templates
         run: |
-          python -m pip install --disable-pip-version-check cfn-lint==1.57.2
+          python3 -m pip install --disable-pip-version-check cfn-lint==1.57.2
           cfn-lint infrastructure/template.yaml infrastructure/github-oidc.yaml
 
       - name: Install pinned CloudFormation Guard
