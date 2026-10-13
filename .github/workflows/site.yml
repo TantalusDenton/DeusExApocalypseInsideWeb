@@ -162,7 +162,6 @@ jobs:
           aws cloudformation deploy
           --template-file infrastructure/template.yaml
           --stack-name apocalypse-inside-staging
-          --change-set-name apocalypse-inside-staging-${{ github.run_id }}
           --role-arn "${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}"
           --capabilities CAPABILITY_NAMED_IAM
           --parameter-overrides
@@ -236,7 +235,6 @@ jobs:
           aws cloudformation deploy
           --template-file infrastructure/template.yaml
           --stack-name apocalypse-inside-production
-          --change-set-name apocalypse-inside-production-${{ github.run_id }}
           --role-arn "${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}"
           --capabilities CAPABILITY_NAMED_IAM
           --parameter-overrides
