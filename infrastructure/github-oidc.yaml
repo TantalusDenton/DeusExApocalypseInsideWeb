@@ -430,6 +430,7 @@ Resources:
                   - cloudformation:DescribeStacks
                   - cloudformation:DescribeStackEvents
                   - cloudformation:GetTemplate
+                  - cloudformation:GetTemplateSummary
                 Resource:
                   - !Sub 'arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/apocalypse-inside-staging/*'
                   - !Sub 'arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:changeSet/apocalypse-inside-staging-*/*'
@@ -512,6 +513,7 @@ Resources:
                   - cloudformation:DescribeStacks
                   - cloudformation:DescribeStackEvents
                   - cloudformation:GetTemplate
+                  - cloudformation:GetTemplateSummary
                 Resource:
                   - !Sub 'arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/apocalypse-inside-production/*'
                   - !Sub 'arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:changeSet/apocalypse-inside-production-*/*'
