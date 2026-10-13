@@ -1,0 +1,559 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  GitHub Actions deployment roles for Apocalypse Inside — uses repository and
+  environment-scoped OIDC trust with separate staging and production permissions.
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: GitHub environment OIDC roles -> scoped CloudFormation execution roles -> S3 + CloudFront
+    must:
+      - Trust only TantalusDenton/DeusExApocalypseInsideWeb staging and production environments
+      - Keep staging and production deployment permissions separate
+      - Update distribution ID parameters after each site stack exists to scope invalidation
+      - Do not add long-lived AWS credentials to GitHub
+    ref:
+      - at: README.md
+        has: OIDC bootstrap, environment protection, and deployment setup
+        scope: operational
+Parameters:
+  GitHubOwner:
+    Type: String
+    Default: TantalusDenton
+  GitHubOwnerId:
+    Type: String
+    Default: '13290284'
+  GitHubRepositoryName:
+    Type: String
+    Default: DeusExApocalypseInsideWeb
+  GitHubRepositoryId:
+    Type: String
+    Default: '1418077434'
+  HostedZoneId:
+    Type: String
+    Default: Z1GO58CUQU667P
+  CreateOidcProvider:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'true'
+  StagingDistributionId:
+    Type: String
+    Default: pending
+  StagingOriginAccessControlId:
+    Type: String
+    Default: pending
+  StagingResponseHeadersPolicyId:
+    Type: String
+    Default: pending
+  ProductionDistributionId:
+    Type: String
+    Default: pending
+  ProductionOriginAccessControlId:
+    Type: String
+    Default: pending
+  ProductionResponseHeadersPolicyId:
+    Type: String
+    Default: pending
+Conditions:
+  MakeOidcProvider: !Equals [!Ref CreateOidcProvider, 'true']
+Resources:
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: MakeOidcProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Registers GitHub Actions as an AWS federated identity provider
+        must:
+          - Use sts.amazonaws.com as the sole audience
+          - Retain the provider because other repository roles may share it
+        mutable: change-with-constraints
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+  StagingCloudFormationRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Executes only the staging stack's S3, CloudFront, ACM, Route 53, Lambda, logs, and Lambda-role changes
+        must:
+          - Trust only cloudformation.amazonaws.com
+          - Limit bucket, DNS zone, function, log, and IAM role resources to staging names
+          - Keep CloudFront creation actions separate from distribution update actions
+        mutable: review-required
+    Properties:
+      RoleName: ApocalypseInsideStagingCloudFormationRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DeployStagingSite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ManageStagingBucket
+                Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:GetBucketLocation
+                  - s3:GetBucketPolicy
+                  - s3:PutBucketPolicy
+                  - s3:DeleteBucketPolicy
+                  - s3:GetBucketPublicAccessBlock
+                  - s3:PutBucketPublicAccessBlock
+                  - s3:GetBucketEncryption
+                  - s3:PutEncryptionConfiguration
+                  - s3:GetBucketOwnershipControls
+                  - s3:PutBucketOwnershipControls
+                  - s3:GetBucketVersioning
+                  - s3:PutBucketVersioning
+                  - s3:GetBucketTagging
+                  - s3:PutBucketTagging
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::apocalypse-inside-staging-${AWS::AccountId}-us-east-1'
+              - Sid: ManageStagingCloudFront
+                Effect: Allow
+                Action:
+                  - cloudfront:CreateDistribution
+                  - cloudfront:CreateOriginAccessControl
+                  - cloudfront:CreateResponseHeadersPolicy
+                Resource: '*'
+              - Sid: ReadCloudFrontConfiguration
+                Effect: Allow
+                Action:
+                  - cloudfront:GetDistribution
+                  - cloudfront:GetDistributionConfig
+                  - cloudfront:GetOriginAccessControl
+                  - cloudfront:GetOriginAccessControlConfig
+                  - cloudfront:GetResponseHeadersPolicy
+                  - cloudfront:GetResponseHeadersPolicyConfig
+                Resource: '*'
+              - Sid: UpdateStagingCloudFront
+                Effect: Allow
+                Action:
+                  - cloudfront:UpdateDistribution
+                  - cloudfront:DeleteDistribution
+                  - cloudfront:TagResource
+                  - cloudfront:UntagResource
+                  - cloudfront:ListTagsForResource
+                  - cloudfront:UpdateOriginAccessControl
+                  - cloudfront:DeleteOriginAccessControl
+                  - cloudfront:UpdateResponseHeadersPolicy
+                  - cloudfront:DeleteResponseHeadersPolicy
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${StagingDistributionId}'
+                  - !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:origin-access-control/${StagingOriginAccessControlId}'
+                  - !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:response-headers-policy/${StagingResponseHeadersPolicyId}'
+              - Sid: ManageStagingCertificate
+                Effect: Allow
+                Action:
+                  - acm:RequestCertificate
+                  - acm:DescribeCertificate
+                  - acm:DeleteCertificate
+                  - acm:AddTagsToCertificate
+                  - acm:RemoveTagsFromCertificate
+                  - acm:ListTagsForCertificate
+                Resource: !Sub 'arn:${AWS::Partition}:acm:us-east-1:${AWS::AccountId}:certificate/*'
+              - Sid: ValidateAndManageStagingDns
+                Effect: Allow
+                Action:
+                  - route53:GetHostedZone
+                  - route53:ListResourceRecordSets
+                  - route53:ChangeResourceRecordSets
+                Resource: !Sub 'arn:${AWS::Partition}:route53:::hostedzone/${HostedZoneId}'
+                Condition:
+                  ForAllValues:StringLike:
+                    route53:ChangeResourceRecordSetsNormalizedRecordNames:
+                      - apocalypseinsi.de
+                      - staging.apocalypseinsi.de
+                      - _*.apocalypseinsi.de
+              - Sid: ReadRoute53Changes
+                Effect: Allow
+                Action: route53:GetChange
+                Resource: !Sub 'arn:${AWS::Partition}:route53:::change/*'
+              - Sid: ManageStagingHealthFunction
+                Effect: Allow
+                Action:
+                  - lambda:CreateFunction
+                  - lambda:DeleteFunction
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:TagResource
+                  - lambda:UntagResource
+                  - lambda:ListTags
+                Resource: !Sub 'arn:${AWS::Partition}:lambda:us-east-1:${AWS::AccountId}:function:apocalypse-inside-staging-health'
+              - Sid: ManageStagingHealthLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                  - logs:PutRetentionPolicy
+                  - logs:DeleteRetentionPolicy
+                  - logs:ListTagsForResource
+                  - logs:TagResource
+                  - logs:UntagResource
+                Resource: !Sub 'arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:/aws/lambda/apocalypse-inside-staging-health'
+              - Sid: DiscoverStagingHealthLogs
+                Effect: Allow
+                Action: logs:DescribeLogGroups
+                Resource: '*'
+              - Sid: ManageStagingLambdaRole
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/apocalypse-inside-staging-*'
+              - Sid: PassOnlyStagingLambdaRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/apocalypse-inside-staging-*'
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: lambda.amazonaws.com
+
+  ProductionCloudFormationRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Executes only the production stack's S3, CloudFront, ACM, Route 53, Lambda, logs, and Lambda-role changes
+        must:
+          - Trust only cloudformation.amazonaws.com
+          - Limit bucket, DNS zone, function, log, and IAM role resources to production names
+          - Keep CloudFront creation actions separate from distribution update actions
+        mutable: review-required
+    Properties:
+      RoleName: ApocalypseInsideProductionCloudFormationRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DeployProductionSite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ManageProductionBucket
+                Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:GetBucketLocation
+                  - s3:GetBucketPolicy
+                  - s3:PutBucketPolicy
+                  - s3:DeleteBucketPolicy
+                  - s3:GetBucketPublicAccessBlock
+                  - s3:PutBucketPublicAccessBlock
+                  - s3:GetBucketEncryption
+                  - s3:PutEncryptionConfiguration
+                  - s3:GetBucketOwnershipControls
+                  - s3:PutBucketOwnershipControls
+                  - s3:GetBucketVersioning
+                  - s3:PutBucketVersioning
+                  - s3:GetBucketTagging
+                  - s3:PutBucketTagging
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::apocalypse-inside-production-${AWS::AccountId}-us-east-1'
+              - Sid: ManageProductionCloudFront
+                Effect: Allow
+                Action:
+                  - cloudfront:CreateDistribution
+                  - cloudfront:CreateOriginAccessControl
+                  - cloudfront:CreateResponseHeadersPolicy
+                Resource: '*'
+              - Sid: ReadCloudFrontConfiguration
+                Effect: Allow
+                Action:
+                  - cloudfront:GetDistribution
+                  - cloudfront:GetDistributionConfig
+                  - cloudfront:GetOriginAccessControl
+                  - cloudfront:GetOriginAccessControlConfig
+                  - cloudfront:GetResponseHeadersPolicy
+                  - cloudfront:GetResponseHeadersPolicyConfig
+                Resource: '*'
+              - Sid: UpdateProductionCloudFront
+                Effect: Allow
+                Action:
+                  - cloudfront:UpdateDistribution
+                  - cloudfront:DeleteDistribution
+                  - cloudfront:TagResource
+                  - cloudfront:UntagResource
+                  - cloudfront:ListTagsForResource
+                  - cloudfront:UpdateOriginAccessControl
+                  - cloudfront:DeleteOriginAccessControl
+                  - cloudfront:UpdateResponseHeadersPolicy
+                  - cloudfront:DeleteResponseHeadersPolicy
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${ProductionDistributionId}'
+                  - !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:origin-access-control/${ProductionOriginAccessControlId}'
+                  - !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:response-headers-policy/${ProductionResponseHeadersPolicyId}'
+              - Sid: ManageProductionCertificate
+                Effect: Allow
+                Action:
+                  - acm:RequestCertificate
+                  - acm:DescribeCertificate
+                  - acm:DeleteCertificate
+                  - acm:AddTagsToCertificate
+                  - acm:RemoveTagsFromCertificate
+                  - acm:ListTagsForCertificate
+                Resource: !Sub 'arn:${AWS::Partition}:acm:us-east-1:${AWS::AccountId}:certificate/*'
+              - Sid: ValidateAndManageProductionDns
+                Effect: Allow
+                Action:
+                  - route53:GetHostedZone
+                  - route53:ListResourceRecordSets
+                  - route53:ChangeResourceRecordSets
+                Resource: !Sub 'arn:${AWS::Partition}:route53:::hostedzone/${HostedZoneId}'
+                Condition:
+                  ForAllValues:StringLike:
+                    route53:ChangeResourceRecordSetsNormalizedRecordNames:
+                      - apocalypseinsi.de
+                      - _*.apocalypseinsi.de
+              - Sid: ReadRoute53Changes
+                Effect: Allow
+                Action: route53:GetChange
+                Resource: !Sub 'arn:${AWS::Partition}:route53:::change/*'
+              - Sid: ManageProductionHealthFunction
+                Effect: Allow
+                Action:
+                  - lambda:CreateFunction
+                  - lambda:DeleteFunction
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:TagResource
+                  - lambda:UntagResource
+                  - lambda:ListTags
+                Resource: !Sub 'arn:${AWS::Partition}:lambda:us-east-1:${AWS::AccountId}:function:apocalypse-inside-production-health'
+              - Sid: ManageProductionHealthLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                  - logs:PutRetentionPolicy
+                  - logs:DeleteRetentionPolicy
+                  - logs:ListTagsForResource
+                  - logs:TagResource
+                  - logs:UntagResource
+                Resource: !Sub 'arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:/aws/lambda/apocalypse-inside-production-health'
+              - Sid: DiscoverProductionHealthLogs
+                Effect: Allow
+                Action: logs:DescribeLogGroups
+                Resource: '*'
+              - Sid: ManageProductionLambdaRole
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/apocalypse-inside-production-*'
+              - Sid: PassOnlyProductionLambdaRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/apocalypse-inside-production-*'
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: lambda.amazonaws.com
+
+  StagingGitHubDeployRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Lets only the staging GitHub environment deploy staging assets and stack changes
+        must:
+          - Trust the exact repository staging environment subject and STS audience
+          - Permit CloudFormation to assume only StagingCloudFormationRole
+          - Limit S3 upload/delete to staging site bucket and invalidation to configured distribution
+        mutable: review-required
+    Properties:
+      RoleName: ApocalypseInsideStagingGitHubDeploy
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOwner}@${GitHubOwnerId}/${GitHubRepositoryName}@${GitHubRepositoryId}:environment:staging'
+      Policies:
+        - PolicyName: DeployStagingFromGitHub
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ChangeStagingStack
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DeleteChangeSet
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/apocalypse-inside-staging/*'
+                  - !Sub 'arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:changeSet/apocalypse-inside-staging-*/*'
+              - Sid: ReadStagingStack
+                Effect: Allow
+                Action:
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:GetTemplate
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/apocalypse-inside-staging/*'
+                  - !Sub 'arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:changeSet/apocalypse-inside-staging-*/*'
+              - Sid: ValidateCloudFormationTemplate
+                Effect: Allow
+                Action: cloudformation:ValidateTemplate
+                Resource: '*'
+              - Sid: PassOnlyStagingCloudFormationRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt StagingCloudFormationRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: cloudformation.amazonaws.com
+              - Sid: UploadStagingSite
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::apocalypse-inside-staging-${AWS::AccountId}-us-east-1'
+              - Sid: UpdateStagingSiteObjects
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:DeleteObject
+                  - s3:AbortMultipartUpload
+                  - s3:ListMultipartUploadParts
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::apocalypse-inside-staging-${AWS::AccountId}-us-east-1/*'
+              - Sid: InvalidateStagingDistribution
+                Effect: Allow
+                Action:
+                  - cloudfront:CreateInvalidation
+                  - cloudfront:GetInvalidation
+                Resource: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${StagingDistributionId}'
+
+  ProductionGitHubDeployRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Lets only the production GitHub environment deploy reviewed production assets and stack changes
+        must:
+          - Trust the exact repository production environment subject and STS audience
+          - Permit CloudFormation to assume only ProductionCloudFormationRole
+          - Limit S3 upload/delete to production site bucket and invalidation to configured distribution
+        mutable: review-required
+    Properties:
+      RoleName: ApocalypseInsideProductionGitHubDeploy
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOwner}@${GitHubOwnerId}/${GitHubRepositoryName}@${GitHubRepositoryId}:environment:production'
+      Policies:
+        - PolicyName: DeployProductionFromGitHub
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ChangeProductionStack
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DeleteChangeSet
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/apocalypse-inside-production/*'
+                  - !Sub 'arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:changeSet/apocalypse-inside-production-*/*'
+              - Sid: ReadProductionStack
+                Effect: Allow
+                Action:
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:GetTemplate
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/apocalypse-inside-production/*'
+                  - !Sub 'arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:changeSet/apocalypse-inside-production-*/*'
+              - Sid: ValidateCloudFormationTemplate
+                Effect: Allow
+                Action: cloudformation:ValidateTemplate
+                Resource: '*'
+              - Sid: PassOnlyProductionCloudFormationRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt ProductionCloudFormationRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: cloudformation.amazonaws.com
+              - Sid: UploadProductionSite
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::apocalypse-inside-production-${AWS::AccountId}-us-east-1'
+              - Sid: UpdateProductionSiteObjects
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:DeleteObject
+                  - s3:AbortMultipartUpload
+                  - s3:ListMultipartUploadParts
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::apocalypse-inside-production-${AWS::AccountId}-us-east-1/*'
+              - Sid: InvalidateProductionDistribution
+                Effect: Allow
+                Action:
+                  - cloudfront:CreateInvalidation
+                  - cloudfront:GetInvalidation
+                Resource: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${ProductionDistributionId}'
+
+Outputs:
+  OidcProviderArn:
+    Value: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+  StagingDeployRoleArn:
+    Value: !GetAtt StagingGitHubDeployRole.Arn
+  ProductionDeployRoleArn:
+    Value: !GetAtt ProductionGitHubDeployRole.Arn
+  StagingCloudFormationRoleArn:
+    Value: !GetAtt StagingCloudFormationRole.Arn
+  ProductionCloudFormationRoleArn:
+    Value: !GetAtt ProductionCloudFormationRole.Arn

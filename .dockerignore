@@ -1,0 +1,6 @@
+**
+!react-site/
+!react-site/**
+react-site/node_modules/
+react-site/dist/
+react-site/*.tsbuildinfo

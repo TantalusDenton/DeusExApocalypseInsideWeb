@@ -1,0 +1,345 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Static Apocalypse Inside hosting — serves a private encrypted S3 origin through
+  CloudFront, with per-environment Route 53 aliases and an IAM-only health Lambda.
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: CloudFront -> private S3 via OAC; ACM + Route 53; private health Lambda
+    must:
+      - Keep S3 private; CloudFront reads only via OAC and distribution-scoped bucket policy
+      - Do not add a public invocation URL or API for HealthFunction
+      - Deploy in us-east-1 because CloudFront viewer certificates are regional there
+      - CreateDnsRecords stays false until production distribution is verified
+    ref:
+      - at: README.md
+        has: deployment order, DNS cutover, rollback, and GitHub Actions design
+        scope: operational
+Parameters:
+  EnvironmentName:
+    Type: String
+    AllowedValues: [staging, production]
+  SiteDomainName:
+    Type: String
+    AllowedPattern: '^[a-z0-9.-]+$'
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+  CreateDnsRecords:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'true'
+Conditions:
+  PublishDnsRecords: !Equals [!Ref CreateDnsRecords, 'true']
+Resources:
+  SiteBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Stores the static site and curated media; deterministic name enables a narrow CI upload policy
+        must:
+          - Keep all four public access blocks enabled
+          - Keep encryption, versioning, and the TLS-only bucket-policy deny
+          - Retain objects when the stack is deleted or this bucket is replaced
+        mutable: change-with-constraints
+        mutability:
+          BucketName: review-required
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Application
+          Value: ApocalypseInside
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  CloudFrontOac:
+    Type: AWS::CloudFront::OriginAccessControl
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Signs CloudFront origin requests so the S3 website is never public
+        must:
+          - Keep signing behavior always and protocol sigv4
+        mutable: change-with-constraints
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-oac'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  ViewerCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Provides HTTPS for the environment hostname; DNS validation is managed in the supplied Route 53 zone
+        must:
+          - Keep certificate in us-east-1 for CloudFront
+          - Certificate domain must exactly match SiteDomainName
+        mutable: change-with-constraints
+    Properties:
+      DomainName: !Ref SiteDomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref SiteDomainName
+          HostedZoneId: !Ref HostedZoneId
+      Tags:
+        - Key: Application
+          Value: ApocalypseInside
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  ResponseHeaders:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Applies browser security controls consistently at the edge
+        must:
+          - Keep CSP self-hosted with no form submission or framing
+          - Keep HSTS enabled for HTTPS visitors
+        mutable: review-required
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub '${AWS::StackName}-security-headers'
+        SecurityHeadersConfig:
+          ContentSecurityPolicy:
+            ContentSecurityPolicy: "default-src 'self'; img-src 'self' data:; style-src 'self'; font-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'none'"
+            Override: true
+          ContentTypeOptions:
+            Override: true
+          FrameOptions:
+            FrameOption: DENY
+            Override: true
+          ReferrerPolicy:
+            ReferrerPolicy: strict-origin-when-cross-origin
+            Override: true
+          StrictTransportSecurity:
+            AccessControlMaxAgeSec: 31536000
+            IncludeSubdomains: true
+            Preload: true
+            Override: true
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Terminates HTTPS and serves the React SPA globally from the private origin
+        must:
+          - Keep TLS redirect, TLS 1.2 minimum, IPv6, and OAC-protected S3 origin
+          - Keep alternate domain covered by ViewerCertificate
+          - Validate the environment hostname before enabling its Route 53 alias
+        mutable: change-with-constraints
+        mutability:
+          Aliases: review-required
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub 'Apocalypse Inside ${EnvironmentName}'
+        Aliases:
+          - !Ref SiteDomainName
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: site
+            DomainName: !GetAtt SiteBucket.RegionalDomainName
+            S3OriginConfig: {}
+            OriginAccessControlId: !GetAtt CloudFrontOac.Id
+        DefaultCacheBehavior:
+          TargetOriginId: site
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          ResponseHeadersPolicyId: !Ref ResponseHeaders
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD, OPTIONS]
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+        ViewerCertificate:
+          AcmCertificateArn: !Ref ViewerCertificate
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+
+  SiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Limits reads to this distribution and denies requests that bypass TLS
+        must:
+          - Allow s3:GetObject only to CloudFront service with this distribution SourceArn
+          - Deny every insecure transport request
+        mutable: must-never-change
+    Properties:
+      Bucket: !Ref SiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontOacRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${SiteBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}'
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt SiteBucket.Arn
+              - !Sub '${SiteBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  SiteAliasA:
+    Type: AWS::Route53::RecordSet
+    Condition: PublishDnsRecords
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Routes the environment hostname to its CloudFront distribution after validation
+        must:
+          - Keep DNS creation conditional until the distribution has passed smoke checks
+        mutable: change-with-constraints
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref SiteDomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt Distribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+        EvaluateTargetHealth: false
+
+  SiteAliasAAAA:
+    Type: AWS::Route53::RecordSet
+    Condition: PublishDnsRecords
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Provides IPv6 access to the same CloudFront distribution
+        must:
+          - Keep the IPv6 alias paired with the A alias
+        mutable: change-with-constraints
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref SiteDomainName
+      Type: AAAA
+      AliasTarget:
+        DNSName: !GetAtt Distribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+        EvaluateTargetHealth: false
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Grants the private health function permission to write only its CloudWatch log stream
+        must:
+          - Trust only lambda.amazonaws.com
+          - Do not attach data access or invocation permissions
+        mutable: change-with-constraints
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: WriteHealthLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-health:*'
+
+  HealthLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Retains health-function logs for 30 days for deployment diagnostics
+        must:
+          - Keep retention bounded to avoid unbounded log storage
+        mutable: change-with-constraints
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-health'
+      RetentionInDays: 30
+
+  HealthFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: HealthLogGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Provides a minimal IAM-invoked deployment health check; Lambda has no public endpoint
+        must:
+          - Use a supported managed runtime
+          - Do not create Function URL, API Gateway, or unauthenticated invoke permission
+        mutable: change-with-constraints
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-health'
+      Description: Minimal private health function; no public endpoint or authentication surface is created.
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Architectures: [arm64]
+      MemorySize: 128
+      Timeout: 3
+      Code:
+        ZipFile: |
+          exports.handler = async () => ({ statusCode: 200, body: JSON.stringify({ status: 'ok' }) });
+      Tags:
+        - Key: Application
+          Value: ApocalypseInside
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+Outputs:
+  SiteBucket:
+    Value: !Ref SiteBucket
+  DistributionId:
+    Value: !Ref Distribution
+  OriginAccessControlId:
+    Value: !GetAtt CloudFrontOac.Id
+  ResponseHeadersPolicyId:
+    Value: !Ref ResponseHeaders
+  DistributionDomain:
+    Value: !GetAtt Distribution.DomainName
+  SiteUrl:
+    Value: !Sub 'https://${SiteDomainName}'
+  HealthFunctionArn:
+    Value: !GetAtt HealthFunction.Arn
+  HealthExecutionRoleArn:
+    Value: !GetAtt LambdaExecutionRole.Arn

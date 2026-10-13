@@ -1,0 +1,23 @@
+let site_buckets = Resources.*[ Type == 'AWS::S3::Bucket' ]
+let distributions = Resources.*[ Type == 'AWS::CloudFront::Distribution' ]
+let lambda_functions = Resources.*[ Type == 'AWS::Lambda::Function' ]
+
+rule site_buckets_are_private_and_encrypted when %site_buckets !empty {
+    %site_buckets.Properties.PublicAccessBlockConfiguration.BlockPublicAcls == true
+    %site_buckets.Properties.PublicAccessBlockConfiguration.BlockPublicPolicy == true
+    %site_buckets.Properties.PublicAccessBlockConfiguration.IgnorePublicAcls == true
+    %site_buckets.Properties.PublicAccessBlockConfiguration.RestrictPublicBuckets == true
+    %site_buckets.Properties.BucketEncryption.ServerSideEncryptionConfiguration[*].ServerSideEncryptionByDefault.SSEAlgorithm == 'AES256'
+    %site_buckets.Properties.VersioningConfiguration.Status == 'Enabled'
+    %site_buckets.DeletionPolicy == 'Retain'
+}
+
+rule distributions_require_tls when %distributions !empty {
+    %distributions.Properties.DistributionConfig.DefaultCacheBehavior.ViewerProtocolPolicy == 'redirect-to-https'
+    %distributions.Properties.DistributionConfig.ViewerCertificate.MinimumProtocolVersion == 'TLSv1.2_2021'
+}
+
+rule lambda_runtime_is_supported when %lambda_functions !empty {
+    %lambda_functions.Properties.Runtime == 'nodejs22.x'
+    %lambda_functions.Properties.FunctionUrlConfig !EXISTS
+}
